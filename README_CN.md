@@ -2,7 +2,7 @@
   <img src="docs/assets/images/logo.svg" alt="JiuwenSwarm Logo" width="160" />
 </p>
 
-<h1 align="center">JiuwenSwarm</h1>
+<h1 align="center">JiuwenSwarm（蜂群智能体）</h1>
 
 <p align="center">
   <strong>懂你所想自主演进，蜂群协作完成复杂任务</strong>

@@ -44,7 +44,7 @@ BASE_PORTS = {
     "agent_server": 18092,
     "web": 19000,
     "gateway": 19001,
-    "frontend": 5173,
+    "frontend": 6173,
 }
 
 # Port types that must be unique across instances

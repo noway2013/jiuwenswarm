@@ -62,11 +62,15 @@ def test_code_subagents_inherit_parent_sys_operation(tmp_path):
         subagents, _ = adapter._build_configured_subagents(MagicMock(), config, {})
 
     assert subagents is not None
+    statusline_spec = _spec_by_name(subagents, "statusline-setup")
     plan_spec = _spec_by_name(subagents, "plan_agent")
     code_spec = _spec_by_name(subagents, "code_agent")
+    assert statusline_spec is not None
     assert plan_spec is not None
     assert code_spec is not None
     # create_subagent only honours spec.sys_operation when spec.workspace is set too.
+    assert statusline_spec.sys_operation is sys_operation
+    assert statusline_spec.workspace == str(tmp_path)
     assert plan_spec.sys_operation is sys_operation
     assert plan_spec.workspace == str(tmp_path)
     assert code_spec.sys_operation is sys_operation
@@ -115,6 +119,7 @@ def test_agent_tool_subagent_reuses_parent_sys_operation(tmp_path):
     parent_config.max_iterations = 15
     parent_config.prompt_mode = None
     parent_config.sys_operation = sys_operation
+    parent_config.enable_read_image_multimodal = False
 
     parent_agent = MagicMock()
     parent_agent.deep_config = parent_config
@@ -130,3 +135,7 @@ def test_agent_tool_subagent_reuses_parent_sys_operation(tmp_path):
         tool._create_sub_agent(agent_def, "session_custom_reviewer_1")
 
     assert create_deep_agent.call_args.kwargs["sys_operation"] is sys_operation
+    assert (
+        create_deep_agent.call_args.kwargs["enable_read_image_multimodal"]
+        is False
+    )

@@ -24,6 +24,12 @@
 - **`channel_context`**：可选；仅过渡或无法落入规范化字段的残余键；`from_dict` 可将旧 `metadata` 迁入以兼容历史。
 - E2A **不规定**传输层（WebSocket、HTTP 等）。
 
+`config.moa_status` 始终经 E2A 在目标 AgentServer 执行，包括单用户 WebSocket
+部署和 AgentOS 路由。Gateway 转发 `params.model_selection` 和已认证用户身份，
+不读取本地 MoA 配置。成功响应包含 `configured`，配置就绪时还包含
+`aggregator_model_name` 和 `aggregator_alias`，不包含凭据。AgentServer 客户端
+缺失或尚未就绪时，Gateway 返回 `SERVICE_UNAVAILABLE`，不在自身目录中回退执行配置检查。
+
 ---
 
 ## 2. 易混点：`method` 的两种含义（必读）
@@ -396,4 +402,9 @@ Agent → 网关 → 客户端的**每一条**出站记录（含流式多帧）�
 ## 变更记录
 
 - v0.2.4b3：`agent.fast` 与 `agent.plan` 模式合并为 `agent` 模式，新增 `work_mode` 字段；Web 模式下 `agent.plan` + `work_mode` 会开启硬规划模式。
+---
 
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

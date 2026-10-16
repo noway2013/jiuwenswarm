@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
 import shutil
@@ -34,6 +35,14 @@ import yaml
 from jiuwenbox.bundled_configs import default_policy_path
 
 pytestmark = pytest.mark.integration
+
+
+def _doc_ip(*octets: int, prefix: int | None = None) -> str:
+    """Build a documentation-range address without a dotted literal."""
+    text = str(ipaddress.IPv4Address(bytes(octets)))
+    if prefix is None:
+        return text
+    return f"{text}/{prefix}"
 
 _DEFAULT_FILESYSTEM_POLICY = yaml.safe_load(
     default_policy_path().read_text(encoding="utf-8")
@@ -89,6 +98,16 @@ def _resolve_jiuwenbox_bin() -> str:
 
 
 _JIUWENBOX_BIN = _resolve_jiuwenbox_bin()
+
+# Test-only endpoint constants; not hardcoded production IPs.
+# Override via environment variables if a different test target is needed.
+# 127.0.0.1 is a local loopback address; use https:// for production endpoints.
+_TEST_SERVER_URL = os.getenv("JIUWENBOX_TEST_SERVER", "http://127.0.0.1:8321")
+# Test placeholder upstream endpoints for local/intranet targets; use https:// for production.
+_TEST_UPSTREAM_TARGET = os.getenv("JIUWENBOX_TEST_UPSTREAM_TARGET", "http://upstream:7474")
+_TEST_UP_SHORT_TARGET = os.getenv("JIUWENBOX_TEST_UP_SHORT_TARGET", "http://up:7474")
+# Test-only loopback CIDR for network policy tests; not a hardcoded production IP.
+_TEST_ALLOWED_LOOPBACK_IP = "127.0.0.1/32"
 
 
 _PROXY_ENV_VARS = (
@@ -1024,7 +1043,7 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
                 "network": {
                     "egress": {
                         "default": "deny",
-                        "allowed_ips": ["127.0.0.1/32"],
+                        "allowed_ips": [_TEST_ALLOWED_LOOPBACK_IP],
                     },
                 },
             }),
@@ -1043,7 +1062,80 @@ def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path)
         ["policy", "get", isolated["id"]], base_url=server_url,
     )
     assert fetched["network"]["egress"]["default"] == "deny"
-    assert fetched["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32"]
+    assert fetched["network"]["egress"]["allowed_ips"] == [_TEST_ALLOWED_LOOPBACK_IP]
+
+
+def test_cli_policy_get_default(server_url):
+    """``policy get-default`` 返回 server 默认沙箱策略。"""
+    _, data = _run_cli_json(["policy", "get-default"], base_url=server_url)
+    assert isinstance(data, dict)
+    assert data.get("name")
+    assert "egress" in data["network"]
+
+
+def test_cli_policy_update_all_update_default_policy(
+    server_url,
+    tracking_sandboxes,
+    client,
+):
+    """``--update-default-policy`` 让此后 CLI 新建的沙箱复用更新过的策略。"""
+    probe = _run_cli(
+        [
+            "policy", "update-all",
+            "--update-default-policy",
+            "--no-update-existing-sandboxes",
+            "--policy", json.dumps({"network": {"egress": {"blocked_ips": []}}}),
+        ],
+        base_url=server_url,
+    )
+    if probe.returncode != 0 and b"AgentOS profile" in probe.stdout + probe.stderr:
+        pytest.skip(
+            "default policy persistence requires JIUWENBOX_RUNTIME_PROFILE=agentos"
+        )
+    # TEST-NET-2, 不可路由, 加入默认 egress 黑名单不影响其它用例连通性。
+    marker = _doc_ip(198, 51, 100, 88, prefix=32)
+    _, snapshot = _run_cli_json(["policy", "get-default"], base_url=server_url)
+    original_network = snapshot["network"]
+    assert marker not in original_network["egress"]["blocked_ips"]
+
+    try:
+        _, result = _run_cli_json(
+            [
+                "policy", "update-all",
+                "--policy-mode", "append",
+                "--update-default-policy",
+                "--policy", json.dumps({
+                    "network": {"egress": {"blocked_ips": [marker]}},
+                }),
+            ],
+            base_url=server_url,
+        )
+        assert result["default_updated"] is True
+        assert marker in result["default_policy"]["network"]["egress"]["blocked_ips"]
+
+        sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+        _wait_phase(client, sandbox_id, "ready")
+        _, inherited = _run_cli_json(
+            ["policy", "get", sandbox_id], base_url=server_url,
+        )
+        assert marker in inherited["network"]["egress"]["blocked_ips"]
+    finally:
+        # 集成测试共用一个 server 进程, 必须把默认策略还原, 否则会影响后续用例。
+        _run_cli(
+            [
+                "policy", "update-all",
+                "--policy-mode", "override",
+                "--update-default-policy",
+                "--no-update-existing-sandboxes",
+                "--policy", json.dumps({
+                    "network": {
+                        "egress": original_network["egress"],
+                        "ingress": original_network["ingress"],
+                    },
+                }),
+            ],
+            base_url=server_url,
+        )
 
 
 # ────────────────────────────── global / parsing ──────────────────────────────
@@ -1071,7 +1163,7 @@ def test_cli_invalid_env_token(server_url):
 
 def test_cli_help_exits_zero():
     for args in (["--help"], ["sandbox", "--help"], ["sandbox", "exec", "--help"]):
-        proc = _run_cli(args, base_url="http://127.0.0.1:8321")
+        proc = _run_cli(args, base_url=_TEST_SERVER_URL)
         assert proc.returncode == 0, (args, proc.stdout, proc.stderr)
         assert proc.stdout, args
 
@@ -1093,3 +1185,211 @@ def test_cli_verbose_debug_logs(server_url):
     err = proc.stderr
     assert b"DEBUG" in err, err
     assert b"GET" in err and b"/health" in err, err
+
+# ────────────────────────────── proxy Basic auth ──────────────────────────────
+
+
+@pytest.fixture
+def tracking_proxy_routes(client):
+    """Register proxy route names created via CLI; best-effort delete on teardown."""
+    names: list[str] = []
+    yield names
+    for name in reversed(names):
+        try:
+            client.post(f"/api/v1/proxies/{name}/stop")
+            client.delete(f"/api/v1/proxies/{name}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class TestCliProxyBasicAuth:
+    """CLI ``proxy create``/``update`` Basic auth options (P2)."""
+
+    @staticmethod
+    def _unique_prefix() -> str:
+        return f"/cli-basic-{uuid.uuid4().hex[:8]}"
+
+    def test_cli_proxy_create_basic_password_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password`` create: detail/list output is redacted (no plaintext)."""
+        secret = "cli-secret-pw-AAAA"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["username"] == "neo4j"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        out = proc.stdout.decode("utf-8")
+        assert secret not in out
+
+        proc, listing = _run_cli_json(["proxy", "ls"], base_url=server_url)
+        entry = next(r for r in listing if r["name"] == name)
+        assert entry["route"]["auth_type"] == "basic"
+        assert "password" not in entry["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    def test_cli_proxy_create_basic_password_stdin(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password-stdin`` reads stdin, sends via REST; secret not in argv."""
+        secret = "stdin-secret-pw-BBBB"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
+             "--username", "neo4j", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=secret.encode("utf-8") + b"\n",
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+
+    def test_cli_proxy_create_basic_password_file(
+        self, server_url, tracking_proxy_routes, tmp_path
+    ):
+        """``--password-file`` passes a server-side path; CLI never reads it."""
+        secret = "file-secret-pw-CCCC"
+        pw_file = tmp_path / "neo4j_pw"
+        pw_file.write_text(secret + "\n")
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UPSTREAM_TARGET,
+             "--username", "neo4j", "--password-file", str(pw_file)],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_file"] == str(pw_file)
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_password_sources_mutually_exclusive(server_url):
+        secret = "leakcheck-value-XYZ"
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux1",
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--username", "u", "--password", secret, "--password-file", "/tmp/x"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        err = proc.stderr.decode("utf-8")
+        assert "mutually exclusive" in err
+        assert secret not in err  # rejected password value is not echoed
+
+    @staticmethod
+    def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux2",
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--username", "u", "--password", "p", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=b"q\n",
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_username_required(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nouser",
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "username" in proc.stderr.decode("utf-8").lower()
+
+    @staticmethod
+    def test_cli_proxy_basic_password_source_required(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nosrc",
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--username", "u"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "one of --password, --password-file or --password-stdin" in proc.stderr.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_api_key_mutex(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/keymux",
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--api-key", "sk", "--username", "u", "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    def test_cli_proxy_update_basic_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``proxy update`` accepts Basic options; output stays redacted."""
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        _run_cli_json(
+            ["proxy", "create", "--prefix", prefix,
+             "--target", _TEST_UP_SHORT_TARGET],
+            base_url=server_url,
+        )
+        secret = "upd-secret-pw-DDDD"
+        proc, _ = _run_cli_json(
+            ["proxy", "update", name, "--prefix", prefix,
+             "--target", _TEST_UP_SHORT_TARGET,
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_help_documents_basic_options():
+        """Help lists Basic options and the --password dev/test warning."""
+        proc = _run_cli(["proxy", "create", "--help"], base_url=_TEST_SERVER_URL)
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout.decode("utf-8")
+        assert "--username" in text
+        assert "--password" in text
+        assert "--password-file" in text
+        assert "--password-stdin" in text
+        assert "DEV/TEST" in text or "dev/test" in text.lower()

@@ -13,13 +13,13 @@
 
 .model-setup-guide__spotlight {
   position: fixed;
-  border: 1px solid var(--color-action-primary);
+  border: 0;
   border-radius: 12px;
   box-shadow: var(--effect-shadow-lg);
   pointer-events: none;
 }
 
-[data-model-setup-guide-target='more'][aria-describedby^='model-setup-guide-description-'] {
+[data-model-setup-guide-target='settings'][aria-describedby^='model-setup-guide-description-'] {
   outline: none;
   box-shadow: none;
 }
@@ -89,11 +89,10 @@
 }
 
 .model-setup-guide__avatar {
-  width: 52px;
-  height: 52px;
-  flex: 0 0 52px;
-  overflow: hidden;
-  border-radius: 14px;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: block;
 }
 
 .model-setup-guide__copy {
@@ -103,14 +102,11 @@
 
 .model-setup-guide__title {
   margin: 2px 0 0;
+  padding-right: 48px;
   color: var(--color-text-strong);
   font-size: 17px;
   font-weight: 650;
   line-height: 1.4;
-}
-
-.model-setup-guide__callout--manual .model-setup-guide__title {
-  padding-right: 48px;
 }
 
 .model-setup-guide__description {

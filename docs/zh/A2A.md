@@ -43,7 +43,7 @@
 启用 A2A 前请先安装可选依赖：
 
 ```bash
-pip install "jiuwenswarm[a2a]"
+pip install "workswarm[a2a]"
 # 或（仓库/开发环境）
 uv sync --extra a2a
 ```
@@ -64,7 +64,7 @@ uv sync --extra a2a
 
 AgentServer 连接仍由网关既有逻辑配置（例如 `AGENT_SERVER_URL` 等），与 A2A 监听端口独立。
 
-当 `A2A_SERVER_ENABLED=true` 且未安装 `jiuwenswarm[a2a]`（或 `uv sync --extra a2a`）时，Gateway 主流程仍会继续启动；A2A 通道启动失败会在日志中输出明确安装指引。
+当 `A2A_SERVER_ENABLED=true` 且未安装 `workswarm[a2a]`（或 `uv sync --extra a2a`）时，Gateway 主流程仍会继续启动；A2A 通道启动失败会在日志中输出明确安装指引。
 
 ---
 
@@ -157,3 +157,9 @@ curl -sS -N -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH
 
 - 鉴权、限流、超时与观测指标：由网关或前置代理统一补强时，保持 `A2AChannel` 只做协议与消息映射为宜。
 - `jiuwenswarm/resources/.env.template` 未预置 A2A/ACP 键时，可在本地 `.env` 手工追加（与 §2 一致）。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

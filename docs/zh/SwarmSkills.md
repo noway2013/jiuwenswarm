@@ -83,7 +83,7 @@ swarm-skill-name/
 
 ````markdown
 ---
-name: medical-consultation-team
+name: medical-consultation-swarm
 version: 1.0.0
 author: jiuwenSwarm-team
 description: |
@@ -149,7 +149,7 @@ roles:
 
 **关键字段说明**：
 
-- **`name`**：技能的唯一标识符，必须与目录名一致（kebab-case，约定以 `-team` 结尾。kebab-case 是使用短横线分隔的命名方式，如 `medical-consultation-team`）。
+- **`name`**：技能的唯一标识符，必须与目录名一致（kebab-case，约定以 `-swarm` 结尾。kebab-case 是使用短横线分隔的命名方式，如 `medical-consultation-swarm`）。
 - **`kind`**：必须为 `swarm-skill`（注意：不是 `type`），用于区分 Swarm Skill 和普通 Agent Skill。
 - **`roles`**：角色列表，**至少 2 个角色**，每个角色必须包含 `id`（角色标识）、`kind`（角色类型，`ai_agent` 或 `human_agent`）、`purpose`（一句话职责描述，≤150 字符）、`skills`（依赖的技能列表）和 `tools`（依赖的工具列表）。
 - **`description`**：技能描述，遵循简洁原则（≤4 行、建议 ≤500 字符，硬上限 1024），采用 WHAT / WHEN / NOT 三行结构。
@@ -377,6 +377,8 @@ tools:
 
 > **注意**：即使没有依赖，也必须显式写 `skills: []` 和 `tools: []`（空列表表示"已检查，确认无依赖"，与省略段不同，省略是规范违规）。
 
+> **关于 `skills` 段的依赖**：这里声明的 Agent Skill 需要已经安装在全局技能库 `~/.jiuwenswarm/agent/workspace/skills/` 中，并且对执行该角色的团队成员可见。团队不会为自己复制一份技能，成员能看见哪些技能由可见性声明决定，详见 [Agent Team](AgentTeam.md) 的「Team Skills」小节。
+
 ---
 
 ## 3. 使用指导
@@ -397,7 +399,7 @@ Swarm Skills 需要在 Agent Team 集群模式下运行。在使用前，请确�
 1. 打开 jiuwenSwarm 的「技能」面板
 2. 点击「Swarm Skills Hub 在线搜索」
 3. 输入关键词搜索所需的团队技能（如"医疗会诊"、"研究报告"等）
-4. 点击「安装」将技能添加到工作区
+4. 点击「安装」将技能装入全局技能库
 
 也可以通过命令行搜索和安装：
 
@@ -413,6 +415,8 @@ Swarm Skills 需要在 Agent Team 集群模式下运行。在使用前，请确�
 ```
 
 > **提示**：`<asset_id>` 是 Swarm Skills Hub 上的技能唯一标识（如 `sk-123`），搜索结果中会显示。
+
+> **技能装在哪里**：无论 Swarm Skill 还是普通 Agent Skill，安装后都只存在一份实体，统一位于全局技能库 `~/.jiuwenswarm/agent/workspace/skills/`。团队和团队成员不会各自拿到一份副本，它们只有一份可见性声明，用来决定各自能看见库里的哪些技能（默认继承全库）。因此安装一次即对全团队生效，无需在团队内再分发。
 
 **步骤二：在 jiuwenSwarm 中使用**
 
@@ -848,7 +852,7 @@ python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 3. 点击「上传」
 4. 首次使用需要认证（输入 Swarm Skills Hub Token）
 
-> **Token 获取方式**：访问 [Swarm Skills Hub](https://swarmskills.openjiuwen.com) 注册账号后，在个人设置页面获取 API Token。
+> **Token 获取方式**：访问 [Swarm Skills Hub](https://teamskills.openjiuwen.com) 注册账号后，在个人设置页面获取 API Token。
 
 也可以通过命令行发布：
 
@@ -860,7 +864,7 @@ python3 scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 /teamskills publish path/to/<swarmskill-name> --version 1.0.1 --token <TOKEN> --force
 ```
 
-> **鉴权说明**：发布和删除操作需要提供 `--token`（用户 Token）或 `--system-token`（系统 Token），且只能选择一种。Token 可通过 `/teamskills config --token <TOKEN>` 预配置，避免每次手动输入。Token 获取方式：访问 [Swarm Skills Hub](https://swarmskills.openjiuwen.com) 注册账号后在个人设置页面获取。
+> **鉴权说明**：发布和删除操作需要提供 `--token`（用户 Token）或 `--system-token`（系统 Token），且只能选择一种。Token 可通过 `/teamskills config --token <TOKEN>` 预配置，避免每次手动输入。Token 获取方式：访问 [Swarm Skills Hub](https://teamskills.openjiuwen.com) 注册账号后在个人设置页面获取。
 
 **步骤三：维护更新**
 
@@ -924,10 +928,16 @@ A: 是的。SKILL.md、roles/、workflow.md、bind.md、dependencies.yaml 都是
 
 **Q: Swarm Skills Hub 的默认地址是什么？**
 
-A: 默认地址为 `https://swarmskills.openjiuwen.com`，可通过环境变量 `TEAM_SKILLS_HUB_BASE_URL` 覆盖。
+A: 默认地址为 `https://teamskills.openjiuwen.com`，可通过环境变量 `TEAM_SKILLS_HUB_BASE_URL` 覆盖。
 
 ---
 
 *文档版本：v2.0*
 *适用对象：jiuwenSwarm 用户、技能开发者*
 *最后更新：2026-07-13*
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

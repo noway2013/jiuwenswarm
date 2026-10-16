@@ -7,38 +7,43 @@ import threading
 import time
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+from jiuwenswarm.common._build_config import PACKAGE_NAME
 from jiuwenswarm.common.config import get_config_raw
-from jiuwenswarm.common.version import __version__
+from jiuwenswarm.common.version import __version__, get_runtime_version
 from jiuwenswarm.common.upgrade_executor import create_executor
 from jiuwenswarm.common.version_source import (
     GitHubReleasesSource,
     GitCodeReleasesSource,
     PyPIVersionSource,
+    ReleaseAsset,
     ReleaseInfo,
+    release_timestamp_key,
 )
+from jiuwenswarm.common.utils import get_user_workspace_dir
 
 DEFAULT_RELEASE_API_GITCODE = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
 DEFAULT_RELEASE_API_GITHUB = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
 DEFAULT_RELEASE_API_PYPI = "https://pypi.org/simple/{package}/"
-DEFAULT_ASSET_PATTERN_WINDOWS = "JiuwenSwarm-setup-{version}.exe"
-DEFAULT_ASSET_PATTERN_MACOS = "JiuwenSwarm-{version}.dmg"
 DEFAULT_ASSET_PATTERN_LINUX = "JiuwenSwarm-{version}.tar.gz"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TEXT = "WbrW92Yn6jif-4Ks3kvzhWVv"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
+DESKTOP_INSTALLER_SUFFIXES = (".exe", ".dmg", ".tar.gz")
 
 DEFAULT_SOURCE_CONFIG: dict[str, Any] = {
     "desktop_release_api_type": "gitcode",
     "repo_owner": "openJiuwen",
     "repo_name": "jiuwenswarm",
+    "package_name": PACKAGE_NAME,
     "release_api_url": "",
     "pypi_mirror": "https://mirrors.aliyun.com/pypi",
     "asset_name_pattern": "",
-    "asset_name_pattern_windows": DEFAULT_ASSET_PATTERN_WINDOWS,
-    "asset_name_pattern_macos": DEFAULT_ASSET_PATTERN_MACOS,
+    "asset_name_pattern_windows": "",
+    "asset_name_pattern_macos": "",
     "asset_name_pattern_linux": DEFAULT_ASSET_PATTERN_LINUX,
 }
 
@@ -61,6 +66,13 @@ def _is_newer_version(candidate: str, current: str) -> bool:
     """
     from jiuwenswarm.common.version_source import release_sort_key
     return release_sort_key(candidate) > release_sort_key(current)
+
+
+def _is_newer_release(candidate_published_at: str, current_published_at: str) -> bool:
+    """Compare desktop releases by publication time, independent of their names."""
+    return release_timestamp_key(candidate_published_at) > release_timestamp_key(
+        current_published_at
+    )
 
 
 def _detect_install_mode() -> str:
@@ -105,7 +117,7 @@ class UpdaterService:
         self._lock = threading.Lock()
         self._download_thread: threading.Thread | None = None
         self._status = UpdateStatus(
-            current_version=__version__,
+            current_version=get_runtime_version(),
             install_mode=_detect_install_mode(),
         )
 
@@ -280,7 +292,7 @@ class UpdaterService:
                 timeout_seconds=timeout,
             ),
             "pypi": lambda: PyPIVersionSource(
-                package=config["repo_name"],
+                package=config["package_name"],
                 mirror=config["pypi_mirror"],
                 timeout_seconds=timeout,
             ),
@@ -294,7 +306,7 @@ class UpdaterService:
     def _check(self, config: dict[str, Any]) -> None:
         source = self._create_version_source(config)
         try:
-            release = source.fetch_latest()
+            release = source.fetch_latest(__version__)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to fetch latest release from {config['release_api_type']}: {exc}"
@@ -305,9 +317,26 @@ class UpdaterService:
             raise RuntimeError("Latest release version is missing.")
 
         install_mode = _detect_install_mode()
-        has_update = _is_newer_version(latest_version, __version__)
+        timestamp_desktop = install_mode == "desktop" and sys.platform in {
+            "darwin",
+            "win32",
+        }
+        if timestamp_desktop:
+            if not release.current_release_published_at:
+                raise RuntimeError(
+                    "Current desktop release timestamp is missing for version "
+                    f"{__version__}."
+                )
+            has_update = _is_newer_release(
+                release.published_at,
+                release.current_release_published_at,
+            )
+        else:
+            has_update = _is_newer_version(latest_version, __version__)
 
         if not has_update:
+            if install_mode == "desktop":
+                self._cleanup_obsolete_desktop_installers()
             self._update_status(
                 latest_version=latest_version,
                 has_update=False,
@@ -330,19 +359,70 @@ class UpdaterService:
 
     def _resolve_desktop_asset(self, config: dict[str, Any], release: ReleaseInfo) -> None:
         platform_key = _platform_asset_key()
-        pattern_key = f"asset_name_pattern_{platform_key}"
-        default_pattern = {
-            "windows": DEFAULT_ASSET_PATTERN_WINDOWS,
-            "macos": DEFAULT_ASSET_PATTERN_MACOS,
-            "linux": DEFAULT_ASSET_PATTERN_LINUX,
-        }.get(platform_key, DEFAULT_ASSET_PATTERN_WINDOWS)
-        asset_name_pattern = config.get(pattern_key) or default_pattern
-        asset_name = asset_name_pattern.format(version=release.version)
+        desktop_suffix = {
+            "windows": ".exe",
+            "macos": ".dmg",
+        }.get(platform_key)
 
-        matched = next((a for a in release.assets if a.name == asset_name), None)
-        if not matched:
-            raise RuntimeError(f"Desktop installer not found: {asset_name}")
+        if desktop_suffix:
+            candidates = []
+            for asset in release.assets:
+                if not asset.download_url:
+                    continue
+                if "/" in asset.name or "\\" in asset.name:
+                    continue
+                if asset.name.lower().endswith(desktop_suffix):
+                    candidates.append(asset)
+            if not candidates:
+                raise RuntimeError(
+                    f"No {platform_key} desktop installer ({desktop_suffix}) found "
+                    "in the latest release."
+                )
+            if len(candidates) > 1:
+                preferred_name = (
+                    f"{PACKAGE_NAME}-{release.version}-{platform_key}{desktop_suffix}"
+                ).lower()
+                exact_matches = [
+                    asset
+                    for asset in candidates
+                    if asset.name.lower() == preferred_name
+                ]
+                compatible_matches = [
+                    asset
+                    for asset in candidates
+                    if PACKAGE_NAME.lower() in asset.name.lower()
+                ]
+                if len(exact_matches) == 1:
+                    matched = exact_matches[0]
+                elif len(compatible_matches) == 1:
+                    matched = compatible_matches[0]
+                else:
+                    names = ", ".join(asset.name for asset in candidates)
+                    raise RuntimeError(
+                        f"Multiple {platform_key} desktop installers "
+                        f"({desktop_suffix}) found in the latest release: {names}"
+                    )
+            else:
+                matched = candidates[0]
+            asset_name = matched.name
+        else:
+            # Linux desktop updates are outside the rename adaptation and keep
+            # the existing versioned filename contract.
+            asset_name_pattern = (
+                config.get("asset_name_pattern_linux")
+                or DEFAULT_ASSET_PATTERN_LINUX
+            )
+            asset_name = asset_name_pattern.format(version=release.version)
+            matched = next(
+                (asset for asset in release.assets if asset.name == asset_name),
+                None,
+            )
+            if not matched:
+                raise RuntimeError(f"Desktop installer not found: {asset_name}")
 
+        downloaded_path, downloaded_bytes = self._downloaded_desktop_asset(matched)
+        self._cleanup_obsolete_desktop_installers(asset_name)
+        state = "downloaded" if downloaded_path else "update_available"
         self._update_status(
             latest_version=release.version,
             has_update=True,
@@ -353,11 +433,53 @@ class UpdaterService:
             asset_name=asset_name,
             matched_asset=asset_name,
             download_url=matched.download_url,
+            downloaded_path=downloaded_path,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=downloaded_bytes,
             checked_at=time.time(),
-            state="update_available",
+            state=state,
             error="",
             installing=False,
         )
+
+    @staticmethod
+    def _downloaded_desktop_asset(asset: ReleaseAsset) -> tuple[str, int]:
+        path = Path(get_user_workspace_dir()) / ".updates" / asset.name
+        try:
+            if not path.is_file():
+                return "", 0
+            size = path.stat().st_size
+        except OSError:
+            return "", 0
+
+        if size <= 0 or (asset.size > 0 and size != asset.size):
+            return "", 0
+        return str(path), size
+
+    @staticmethod
+    def _cleanup_obsolete_desktop_installers(keep_name: str = "") -> None:
+        updates_dir = Path(get_user_workspace_dir()) / ".updates"
+        if not updates_dir.is_dir():
+            return
+
+        case_insensitive_names = sys.platform in {"win32", "darwin"}
+        keep_name_key = keep_name.casefold() if case_insensitive_names else keep_name
+
+        try:
+            paths = tuple(updates_dir.iterdir())
+        except OSError:
+            return
+
+        for path in paths:
+            path_name_key = path.name.casefold() if case_insensitive_names else path.name
+            if path_name_key == keep_name_key:
+                continue
+            if not path.name.lower().endswith(DESKTOP_INSTALLER_SUFFIXES):
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
 
     def _resolve_pip_asset(self, config: dict[str, Any], release: ReleaseInfo) -> None:
         whl = next((a for a in release.assets if a.name.endswith(".whl")), None)
@@ -394,6 +516,7 @@ class UpdaterService:
             api_type = "pypi"
         owner = str(updater.get("repo_owner") or "openJiuwen").strip()
         repo = str(updater.get("repo_name") or "jiuwenswarm").strip()
+        package = PACKAGE_NAME
         release_api_url = str(updater.get("release_api_url") or "").strip()
         if not release_api_url:
             if api_type == "github":
@@ -401,9 +524,9 @@ class UpdaterService:
             elif api_type == "pypi":
                 pypi_mirror = str(updater.get("pypi_mirror") or "").strip()
                 if pypi_mirror:
-                    release_api_url = urljoin(pypi_mirror, f"simple/{repo}/")
+                    release_api_url = urljoin(pypi_mirror, f"simple/{package}/")
                 else:
-                    release_api_url = DEFAULT_RELEASE_API_PYPI.format(package=repo)
+                    release_api_url = DEFAULT_RELEASE_API_PYPI.format(package=package)
             else:
                 release_api_url = DEFAULT_RELEASE_API_GITCODE.format(owner=owner, repo=repo)
         timeout_seconds = updater.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
@@ -421,16 +544,17 @@ class UpdaterService:
             "install_mode": _detect_install_mode(),
             "repo_owner": owner,
             "repo_name": repo,
+            "package_name": package,
             "release_api_url": release_api_url,
             "asset_name_pattern_windows": str(
                 updater.get("asset_name_pattern_windows")
                 or global_asset_name_pattern
-                or DEFAULT_ASSET_PATTERN_WINDOWS
+                or ""
             ),
             "asset_name_pattern_macos": str(
                 updater.get("asset_name_pattern_macos")
                 or global_asset_name_pattern
-                or DEFAULT_ASSET_PATTERN_MACOS
+                or ""
             ),
             "asset_name_pattern_linux": str(
                 updater.get("asset_name_pattern_linux")

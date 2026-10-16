@@ -31,14 +31,17 @@ import { createMemoryCommand } from "./builtins/memory.js";
 import { createPluginCommand } from "./builtins/plugin.js";
 import { createReloadPluginsCommand } from "./builtins/reload-plugins.js";
 import { createModeCommand } from "./builtins/mode.js";
+import { createNewCommand } from "./builtins/new.js";
 import { createPermissionsCommand } from "./builtins/permissions.js";
 import { createPlanCommand } from "./builtins/plan.js";
+import { createPersistCommand } from "./builtins/persist.js";
 import { createResumeCommand } from "./builtins/resume.js";
 import { createRenameCommand } from "./builtins/rename.js";
 import { createRewindCommand } from "./builtins/rewind.js";
 import { createSandboxCommand } from "./builtins/sandbox.js";
 import { createSessionCommand } from "./builtins/session.js";
 import { createSimplifyCommand } from "./builtins/simplify.js";
+import { createAutofixPrCommand } from "./builtins/autofix-pr.js";
 import { createStatusCommand } from "./builtins/status.js";
 import { createStatusLineCommand } from "./builtins/statusline.js";
 import { createSkillsCommand } from "./builtins/skills.js";
@@ -105,14 +108,17 @@ export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): Sla
     createModelCommand(),
     createMcpCommand(),
     createModeCommand(),
+    createNewCommand(),
     createPermissionsCommand(),
     createPlanCommand(),
+    createPersistCommand(),
     createResumeCommand(),
     createRenameCommand(),
     createRewindCommand(),
     createSandboxCommand(),
     createSessionCommand(),
     createSimplifyCommand(),
+    createAutofixPrCommand(),
     createSkillsCommand(),
     createStatusCommand(),
     createStatusLineCommand(),

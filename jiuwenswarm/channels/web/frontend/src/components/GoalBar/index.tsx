@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
 import type { GoalRecord, GoalStatus } from '../../types';
+import { hasPendingGoalAction } from '../../features/goalMode/goalModeGate';
 import { EditGoalModal } from './EditGoalModal';
 import './GoalBar.css';
 
@@ -85,8 +86,8 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const [editing, setEditing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   // 暂停/恢复点击后的乐观图标翻转：只影响图标选哪个，不影响按钮是否可点（仍然沿用下面的
-  // isDisabled 整组置灰）、也不影响状态文字颜色（那个继续等权威数据）。pendingAction 落地
-  // （不管成功还是失败兜底完）后清空，让真实 goal.status 接管。
+  // isDisabled 置灰）、也不影响状态文字颜色（那个继续等权威数据）。pendingAction
+  // 落地（不管成功还是失败兜底完）后清空，让真实 goal.status 接管。
   const [optimisticPausable, setOptimisticPausable] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -136,30 +137,39 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const tone: DisplayTone = degraded ?? STATUS_TONE[goal.status as GoalStatus] ?? 'active';
   const isPausable = goal.status === 'active';
   const isResumable = goal.status === 'paused' || goal.status === 'blocked';
-  const isBusy = pendingAction !== null;
-  const isDisabled = isBusy || degraded !== null;
+  // bugfix 2026092201 bug001 第9轮修订（第7轮的方向反了，这里改回来）：GoalBar 的编辑/
+  // 暂停(恢复)/删除三个按钮统一只用 hasPendingGoalAction 做"上一次操作还没回执"的双击
+  // 防护，都不受 isGoalStatusActive 限制——这也是 bugfix 之前的原始语义。
+  //
+  // 用户明确澄清过："+"菜单目标开关的关闭方向、目标 tag 的 × 关闭按钮是"轻量切换/随手一点"
+  // 的入口，active 时要挡，防止手滑关掉正在执行的目标；但 GoalBar 的"删除"按钮是用户专门
+  // 打开这个悬浮条、有意识点击的正式终止入口，语义是"我现在就要终止并删除这个正在执行的
+  // 目标"，不该被同一套"active 就算忙"的判断锁死——锁死了用户就没有任何正式渠道能主动
+  // 停掉一个正在跑偏的目标（"暂停"只是暂停，不是终止/清除）。第7轮把删除和"+"菜单/tag
+  // 归成一类、只把编辑和暂停摘出来，分类分错了，这次把删除也一起摘出来。
+  const isDisabled = hasPendingGoalAction(activeSessionId) || degraded !== null;
   // 图标显示用的"是否展示为可暂停"：乐观值优先，否则用真实状态。
   const displayAsPausable = optimisticPausable ?? isPausable;
 
   return (
-    <div className="goal-bar-attached">
-      <div className={`goal-bar goal-bar--tone-${tone}`}>
-        <Target size={16} strokeWidth={2} className="goal-bar__icon" />
-        <div className="goal-bar__main">
-          <span className={`goal-bar__status goal-bar__status--${tone}`}>
+    <div className="goal-bar-attached" data-testid="goal-bar-attached">
+      <div className={`goal-bar goal-bar--tone-${tone}`} data-testid="goal-bar" data-variant={tone}>
+        <Target size={16} strokeWidth={2} className="goal-bar__icon" data-testid="goal-bar-icon" />
+        <div className="goal-bar__main" data-testid="goal-bar-main">
+          <span className={`goal-bar__status goal-bar__status--${tone}`} data-testid="goal-bar-status" data-variant={tone}>
             {t(`goal.status.${degraded ?? goal.status}`, degraded ?? goal.status)}
           </span>
-          <span className="goal-bar__objective" title={goal.objective}>
+          <span className="goal-bar__objective" title={goal.objective} data-testid="goal-bar-objective">
             {goal.objective}
           </span>
-          <span className="goal-bar__elapsed">
+          <span className="goal-bar__elapsed" data-testid="goal-bar-elapsed">
             ·{' '}
             {goal.time_used_seconds !== undefined
               ? formatElapsedFromGoal(goal, now)
               : formatElapsedFallback(goal.created_at ?? localCreatedAt, now)}
           </span>
         </div>
-        <div className="goal-bar__actions">
+        <div className="goal-bar__actions" data-testid="goal-bar-actions">
           {goal.status !== 'completed' && (
             <button
               type="button"
@@ -167,6 +177,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               className="goal-bar__action-btn"
               disabled={isDisabled}
               onClick={() => setEditing(true)}
+              data-testid="goal-bar-edit-button"
             >
               <Pencil size={14} strokeWidth={2} />
             </button>
@@ -186,6 +197,8 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
                   onResumeGoal(activeSessionId);
                 }
               }}
+              data-testid="goal-bar-pause-resume-button"
+              data-variant={displayAsPausable ? 'pause' : 'resume'}
             >
               {displayAsPausable ? <Pause size={14} strokeWidth={2} /> : <Play size={14} strokeWidth={2} />}
             </button>
@@ -196,6 +209,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
             className="goal-bar__action-btn goal-bar__action-btn--danger"
             disabled={isDisabled}
             onClick={() => onClearGoal(activeSessionId)}
+            data-testid="goal-bar-delete-button"
           >
             <Trash2 size={14} strokeWidth={2} />
           </button>
@@ -203,28 +217,30 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
       </div>
 
       {editing && (
-        <EditGoalModal
-          initialObjective={goal.objective}
-          onCancel={() => setEditing(false)}
-          onSave={(objective) => {
-            // 防御性兜底：正常情况下上面那个 useEffect 会在目标转 completed 的瞬间就关掉弹窗，
-            // 这里理论上不会命中，但保存动作本身是不可逆的（会把已完成的目标复活），多一层检查
-            // 成本很低。
-            const latestGoal = useGoalStore.getState().runtimes[activeSessionId]?.goal;
-            if (!latestGoal || latestGoal.goal_id !== goal.goal_id || latestGoal.status === 'completed') {
+        <div data-testid="goal-bar-edit-modal-slot">
+          <EditGoalModal
+            initialObjective={goal.objective}
+            onCancel={() => setEditing(false)}
+            onSave={(objective) => {
+              // 防御性兜底：正常情况下上面那个 useEffect 会在目标转 completed 的瞬间就关掉弹窗，
+              // 这里理论上不会命中，但保存动作本身是不可逆的（会把已完成的目标复活），多一层检查
+              // 成本很低。
+              const latestGoal = useGoalStore.getState().runtimes[activeSessionId]?.goal;
+              if (!latestGoal || latestGoal.goal_id !== goal.goal_id || latestGoal.status === 'completed') {
+                setEditing(false);
+                useChatStore.getState().addMessage(activeSessionId, {
+                  id: `error-${Date.now()}`,
+                  role: 'system',
+                  content: t('goal.editStaleWarning'),
+                  timestamp: new Date().toISOString(),
+                });
+                return;
+              }
+              onSetGoal(activeSessionId, objective);
               setEditing(false);
-              useChatStore.getState().addMessage(activeSessionId, {
-                id: `error-${Date.now()}`,
-                role: 'system',
-                content: t('goal.editStaleWarning'),
-                timestamp: new Date().toISOString(),
-              });
-              return;
-            }
-            onSetGoal(activeSessionId, objective);
-            setEditing(false);
-          }}
-        />
+            }}
+          />
+        </div>
       )}
     </div>
   );

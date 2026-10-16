@@ -1,6 +1,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Prompt rail for reporting real team workspace artifact paths."""
+"""Prompt rail separating project deliverables from team-shared outputs.
+
+The team workspace is the team's config / internal-data directory (prompts,
+team.yaml, skill visibility, trajectories) accessed by absolute path — not a
+task cwd and not a deliverables drop. Final deliverables for a projectless
+member go to the shared team ``outputs/`` directory; deliverables for a member
+bound to a project go in the project, matching single-agent behaviour.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class TeamWorkspaceReportPathRail(DeepAgentRail):
-    """Inject guidance for reporting real shared-workspace artifact paths."""
+    """Inject the filesystem ownership policy for project and team artifacts."""
 
     priority = 5
 
@@ -24,12 +31,16 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         self,
         *,
         root_dir: str,
+        project_dir: str | None = None,
+        outputs_dir: str | None = None,
         team_id: str | None = None,
         language: str = "cn",
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
         self._root_dir = str(Path(root_dir))
+        self._project_dir = str(Path(project_dir)) if project_dir else None
+        self._outputs_dir = str(Path(outputs_dir)) if outputs_dir else None
         self._team_id = team_id or ""
         self._language = language
         self._swarm_context: Any | None = None
@@ -43,6 +54,33 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         evolution capability or prompt content by itself.
         """
         self._swarm_context = context
+
+    def _send_file_enabled(self) -> bool:
+        """当前渠道是否允许文件投递（``channels.<channel>.send_file_allowed``）。
+
+        小艺等渠道关掉该开关后，``send_file_to_user`` 不会注册给模型，
+        提示词里也就不能再要求它发文件，否则模型会承诺一个它没有的能力。
+        渠道未知时保持原有提示（不改变既有行为）。
+        """
+        context = self._swarm_context
+        channel = (
+            str(getattr(context, "channel_id", "") or "").strip() if context else ""
+        )
+        if not channel:
+            return True
+        try:
+            from jiuwenswarm.agents.harness.common.tools.file_delivery_policy import (
+                is_send_file_enabled,
+            )
+            from jiuwenswarm.common.config import get_config
+
+            return is_send_file_enabled(get_config(), channel)
+        except Exception as exc:  # noqa: BLE001 - 判定失败时保持原有提示
+            logger.warning(
+                "[TeamWorkspaceReportPathRail] send_file policy lookup failed: %s",
+                exc,
+            )
+            return True
 
     def init(self, agent) -> None:
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
@@ -80,10 +118,15 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
                 language=str(getattr(context, "language", None) or self._language),
                 member_name=getattr(context, "member_name", None),
                 root_dir=getattr(context, "team_ws_root", None) or self._root_dir,
-                skills_dir=getattr(context, "team_skills_dir", None),
+                project_dir=getattr(context, "project_dir", None) or self._project_dir,
+                # No skills_dir: a team owns no Skill directory. Every agent
+                # reads the single library and is narrowed by visibility
+                # metadata, so there is nothing team-scoped to thread here.
                 team_id=team_id,
                 config=config,
-                trajectory_registry=getattr(context, "trajectory_registry", None),
+                trajectory_span_processor=getattr(
+                    context, "trajectory_span_processor", None
+                ),
             )
             team_manager = get_team_manager(channel)
             if role == "leader":
@@ -108,22 +151,81 @@ class TeamWorkspaceReportPathRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        mount = f".team/{self._team_id}/" if self._team_id else ".team/"
-        sample = str(Path(self._root_dir) / "prd-review-memo.md")
+        # The team workspace is a config / internal-data directory accessed by
+        # absolute path, never a deliverables drop. Final deliverables land in
+        # the project for members bound to one (matching single-agent
+        # behaviour), or in the shared team ``outputs/`` directory for
+        # projectless members.
+        outputs = self._outputs_dir
+        if self._project_dir:
+            deliverables_lines = (
+                f"- User project root: `{self._project_dir}`\n"
+                "- Source code, tests, configuration, project documentation, and "
+                "files the user asks to create or modify belong in the active "
+                "project working root. When worktree isolation is active, the "
+                "worktree is the active project working root: use its cwd and "
+                "never bypass it with an absolute path to the main checkout.\n"
+                "- Without worktree isolation, use project-relative paths or "
+                "absolute paths under the user project root.\n"
+                "- This member is bound to a project, so final deliverables stay "
+                "in the project — do not write them to the team shared "
+                "deliverables directory.\n"
+            )
+        elif outputs:
+            deliverables_lines = (
+                "- No user project root is bound to this member. Final "
+                "deliverables (reports, exports, data, and other output the user "
+                "will receive) go to the shared team deliverables directory:\n"
+                f"  - Final deliverables directory: `{outputs}`\n"
+                "- The whole team shares this one directory; distinguish your "
+                "outputs by filename.\n"
+                "- Intermediate files, caches, and temporary scripts stay in "
+                "your own working directory (the per-member temporary working "
+                "directory named in the directory boundaries section); only "
+                "final deliverables go to the shared directory above.\n"
+            )
+        else:
+            deliverables_lines = (
+                "- No user project root is available and no shared deliverables "
+                "directory is configured. Resolve the project directory or "
+                "confirm a destination before creating deliverables; do not "
+                "silently drop them in the team workspace.\n"
+            )
+
+        # 文件投递提示按渠道开关给：渠道关了 send_file_allowed 就不提示
+        # send_file_to_user（工具本身也不会注册），避免模型承诺发不出的文件。
+        if self._send_file_enabled():
+            delivery_lines = (
+                "- `send_file_to_user` controls message delivery only; it never "
+                "changes the required on-disk destination.\n"
+                "- A path mentioned in `send_message` or a completion summary does "
+                "not deliver the file. Call `send_file_to_user` only when the user "
+                "requested a downloadable file.\n"
+            )
+        else:
+            delivery_lines = (
+                "- This channel cannot deliver files. Do not promise to send a "
+                "file; put the deliverable's content (or its absolute path) in "
+                "your reply instead.\n"
+            )
+
         content = (
-            "# Team Workspace Artifact Paths\n\n"
-            f"- Team workspace absolute root: `{self._root_dir}`\n"
-            f"- Internal mount path: `{mount}`\n"
-            "- Use the internal mount path only for tool read/write operations.\n"
-            "- For every final deliverable file, call `send_file_to_user` with its real absolute filesystem path "
-            "before marking the task complete or sending the completion message.\n"
-            "- A file name or path in `send_message`, the final response, or a task-completion summary does not "
-            "deliver the file and must not replace `send_file_to_user`.\n"
-            "- After `send_file_to_user` succeeds, report the real absolute filesystem path under the team "
-            "workspace absolute root, not the `.team/...` mount path.\n"
-            "- If a generated artifact path contains `.team/<team>/team-workspace/`, remove that mount prefix and "
-            "join the remaining file name under the team workspace absolute root before sending and reporting it.\n"
-            f"- Example absolute path to pass to `send_file_to_user`: `{sample}`\n"
+            "# Project and Team Workspace File Policy\n\n"
+            f"{deliverables_lines}"
+            f"{delivery_lines}"
+            f"- Team shared workspace (config / internal data): `{self._root_dir}`\n"
+            "- The team shared workspace holds the team's prompts, team.yaml, "
+            "skill-visibility metadata, trajectories, and the shared "
+            "deliverables directory. Access it by absolute path — do not create "
+            "a `.team` sub-directory under it or under your own workspace.\n"
+            "- Use the team shared workspace only for internal coordination "
+            "artifacts such as plans, drafts, review notes, intermediate data, "
+            "and handoff material that is not part of the user's project, or "
+            "when the user explicitly requests that exact team-workspace "
+            "destination.\n"
+            "- Do not place final project files in the team shared workspace "
+            "root; members bound to a project keep deliverables in the project "
+            "and projectless members use the deliverables directory above.\n"
         )
         self.system_prompt_builder.add_section(
             PromptSection(

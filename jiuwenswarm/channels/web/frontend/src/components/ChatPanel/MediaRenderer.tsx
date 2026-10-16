@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { MediaItem } from '../../types';
 import { FileIcon, getFileExtensionLabel } from '../FileIcon';
+import { normalizePath } from '../../features/sessionAssets/sessionAssets';
 import { stripUploadDocumentBlocks } from '../../utils/documentMessage';
 
 export { stripUploadDocumentBlocks };
@@ -42,6 +43,9 @@ function mediaSrc(item: MediaItem): string | undefined {
 
 function FileCard({ item }: { item: MediaItem }) {
   const filename = item.filename || 'file';
+  // 素材改过名的话（比如上传后在卡片上重命名过），这里显示新名字；扩展名标签、图标类型、
+  // 下载文件名仍然按真实文件名走，重命名只影响这一处展示文字。
+  const displayLabel = item.displayName || filename;
   const extLabel = getFileExtensionLabel(filename);
   const src = mediaSrc(item);
   const showThumb = isImageItem(item) && Boolean(src);
@@ -56,8 +60,8 @@ function FileCard({ item }: { item: MediaItem }) {
         )}
       </span>
       <span className="chat-msg-file-card__meta">
-        <span className="chat-msg-file-card__name" title={filename}>
-          {filename}
+        <span className="chat-msg-file-card__name" title={displayLabel}>
+          {displayLabel}
         </span>
         {extLabel ? <span className="chat-msg-file-card__ext">{extLabel}</span> : null}
       </span>
@@ -68,9 +72,11 @@ function FileCard({ item }: { item: MediaItem }) {
     return (
       <a
         className="chat-msg-file-card"
+        data-testid="chat-panel-msg-file-card"
+        data-variant={filename}
         href={src}
         download={filename}
-        title={filename}
+        title={displayLabel}
       >
         {body}
       </a>
@@ -78,7 +84,7 @@ function FileCard({ item }: { item: MediaItem }) {
   }
 
   return (
-    <div className="chat-msg-file-card" title={filename}>
+    <div className="chat-msg-file-card" data-testid="chat-panel-msg-file-card" data-variant={filename} title={displayLabel}>
       {body}
     </div>
   );
@@ -107,10 +113,11 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
   }, [open]);
 
   return (
-    <div className="chat-msg-file-more" ref={rootRef}>
+    <div className="chat-msg-file-more" data-testid="chat-panel-msg-file-more" ref={rootRef}>
       <button
         type="button"
         className="chat-msg-file-more__btn"
+        data-testid="chat-panel-msg-file-more-btn"
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((prev) => !prev)}
@@ -118,9 +125,10 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
         +{items.length}
       </button>
       {open && (
-        <div className="chat-msg-file-more__menu" role="menu">
+        <div className="chat-msg-file-more__menu" data-testid="chat-panel-msg-file-more-menu" role="menu">
           {items.map((item, index) => {
             const filename = item.filename || 'file';
+            const displayLabel = item.displayName || filename;
             const src = mediaSrc(item);
             const showThumb = isImageItem(item) && Boolean(src);
             const content = (
@@ -128,10 +136,10 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 {showThumb ? (
                   <img src={src} alt="" className="chat-msg-file-more__thumb" />
                 ) : (
-                  <FileIcon fileName={filename} size={20} />
+                  <FileIcon fileName={filename} size={14} />
                 )}
-                <span className="chat-msg-file-more__name" title={filename}>
-                  {filename}
+                <span className="chat-msg-file-more__name" title={displayLabel}>
+                  {displayLabel}
                 </span>
               </>
             );
@@ -140,6 +148,8 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
                 <a
                   key={`${filename}-${index}`}
                   className="chat-msg-file-more__item"
+                  data-testid="chat-panel-msg-file-more-item"
+                  data-variant={filename}
                   href={src}
                   download={filename}
                   role="menuitem"
@@ -150,7 +160,13 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
               );
             }
             return (
-              <div key={`${filename}-${index}`} className="chat-msg-file-more__item" role="menuitem">
+              <div
+                key={`${filename}-${index}`}
+                className="chat-msg-file-more__item"
+                data-testid="chat-panel-msg-file-more-item"
+                data-variant={filename}
+                role="menuitem"
+              >
                 {content}
               </div>
             );
@@ -161,19 +177,13 @@ function OverflowMenu({ items }: { items: MediaItem[] }) {
   );
 }
 
-function FileAttachmentBar({
-  items,
-  align = 'end',
-}: {
-  items: MediaItem[];
-  align?: 'start' | 'end';
-}) {
+function FileAttachmentBar({ items, align = 'end' }: { items: MediaItem[]; align?: 'start' | 'end' }) {
   if (!items.length) return null;
   const visible = items.slice(0, VISIBLE_FILE_COUNT);
   const overflow = items.slice(VISIBLE_FILE_COUNT);
 
   return (
-    <div className={`chat-msg-file-row chat-msg-file-row--${align}`}>
+    <div className={`chat-msg-file-row chat-msg-file-row--${align}`} data-testid="chat-panel-msg-file-row">
       {visible.map((item, index) => (
         <FileCard key={`${item.filename}-${index}`} item={item} />
       ))}
@@ -193,13 +203,13 @@ function MediaItemView({ item }: { item: MediaItem }) {
   switch (item.type) {
     case 'audio':
       return (
-        <audio controls className="w-full">
+        <audio controls className="w-full" data-testid="chat-panel-msg-media-item" data-variant="audio">
           <source src={src} type={mimeType} />
         </audio>
       );
     case 'video':
       return (
-        <video controls className="chat-msg-media-image">
+        <video controls className="chat-msg-media-image" data-testid="chat-panel-msg-media-item" data-variant="video">
           <source src={src} type={mimeType} />
         </video>
       );
@@ -208,19 +218,62 @@ function MediaItemView({ item }: { item: MediaItem }) {
   }
 }
 
+/**
+ * 同一份素材只留一张卡片。
+ *
+ * 一张附件会被两条路径各补一张：消息自带的 mediaItems 是一张，@素材 引用再按名字解析
+ * 一张（发送端 useWebSocket 和渲染端 MessageItem 各自都做了一次去重）。任一侧因为路径
+ * 写法不同没对上，气泡上就会并排出现两张一样的卡片。渲染是最后一道关，这里再收一次：
+ * 优先按路径判重（Windows 路径忽略大小写/斜杠方向），路径缺失时退一步按展示名——用户
+ * 看到的就是名字，两张同名的卡片正是用户口中的“重复素材”。
+ */
+function dedupeMediaItems(items: MediaItem[]): MediaItem[] {
+  if (items.length < 2) return items;
+  const seenPaths = new Set<string>();
+  const seenLooseNames = new Set<string>();
+  const deduped: MediaItem[] = [];
+  for (const item of items) {
+    const label = item.displayName || item.filename || '';
+    const nameKey = label
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/\.[^.]+$/, '')
+      .trim()
+      .toLowerCase();
+    const path = normalizePath(item.path ?? '').trim();
+    // 新任务里这条消息的第一个附件往往还没落盘：那条记录只有 base64 和文件名，没有路径，
+    // 而 @素材 引用解析出来的那条带着落盘路径。两者的 src 也各不相同（data: 对 raw-file），
+    // 所以只比路径或只比 src 都认不出是同一张卡片——名字才是两边都有的身份。
+    // 两条都带路径时只认路径，避免把两个不同目录下的同名文件并成一张。
+    if (path) {
+      if (seenPaths.has(path) || (nameKey && seenLooseNames.has(nameKey))) continue;
+      seenPaths.add(path);
+    } else {
+      if (nameKey && seenLooseNames.has(nameKey)) continue;
+      if (nameKey) seenLooseNames.add(nameKey);
+    }
+    deduped.push(item);
+  }
+  return deduped.length === items.length ? items : deduped;
+}
+
 export function MediaRenderer({ items, align = 'end', variant = 'inline' }: MediaRendererProps) {
   if (!items.length) {
     return null;
   }
 
-  const cardItems = items.filter(isCardItem);
-  const richItems = items.filter((item) => !isCardItem(item));
+  const dedupedItems = dedupeMediaItems(items);
+  const cardItems = dedupedItems.filter(isCardItem);
+  const richItems = dedupedItems.filter((item) => !isCardItem(item));
 
   return (
-    <div className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'}>
+    <div
+      className={variant === 'above' ? 'chat-msg-attachments chat-msg-attachments--above' : 'chat-msg-attachments'}
+      data-testid="chat-panel-msg-attachments"
+    >
       {cardItems.length > 0 && <FileAttachmentBar items={cardItems} align={align} />}
       {richItems.length > 0 && (
-        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`}>
+        <div className={`chat-msg-media-rich chat-msg-media-rich--${align}`} data-testid="chat-panel-msg-media-rich">
           {richItems.map((item, index) => (
             <MediaItemView key={`${item.filename}-${index}`} item={item} />
           ))}

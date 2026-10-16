@@ -34,6 +34,7 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
 | `/hooks` | Browse configured hooks (read-only, see below) |
 | `/simplify` | Code simplify review: checks reuse, quality, efficiency and auto-fixes (`code.*` only, see below) |
+| `/autofix-pr` | Fix the current branch's open PR until checks pass and review comments are addressed; auto-detects the forge (GitHub via `gh`, GitCode via REST); `--watch` re-runs until green/merged/closed (`code.*` only, see [Auto-fix PR](AutofixPR.md)) |
 | `/sandbox` | Set sandbox mode (see below) |
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
@@ -244,7 +245,6 @@ Working tree changes are obtained via `git diff HEAD` (tracked files only). The 
 | Boundary | Value | Behavior |
 |---|---|---|
 | Max files in detail | 50 | Only the first 50 tracked files get hunks; stats still cover all changed files |
-| Max lines per file | 400 | Hunks are truncated beyond 400 lines per file; `isTruncated` flag is set |
 | Max diff size per file | 1 MB | Files whose diff exceeds 1 MB are skipped in hunk parsing; `isLargeFile` flag is set, stats still counted |
 | Max files for details | 500 | If more than 500 files changed, only aggregate stats are returned (no per-file hunks) |
 | Git command timeout | 10s | Git commands that exceed 10 seconds return `None` |
@@ -326,16 +326,16 @@ Working tree changes are obtained via `git diff HEAD` (tracked files only). The 
 
 These commands are registered and parsed by the TUI, then forwarded as slash text through the normal chat channel. The actual evolution logic runs on the Agent / Team backend:
 
-- Agent mode: handled by `SkillEvolutionRail`; only `agent.plan` is supported.
-- Team mode: handled by `TeamSkillEvolutionRail` for team skill evolution.
+- Agent mode: uses the single-Agent evolution runtime; automatic suggestions target regular Skills.
+- Team mode: uses the team evolution runtime; automatic suggestions target Team/Swarm Skills.
 - Code mode and `agent.fast` do not support these commands.
 
 #### Subcommands
 
 | Command | Description |
 |---|---|
-| `/evolve <skill_name> [user_query]` | Trigger evolution for one skill. `agent.plan` scans the current conversation for tool failures and user corrections; Team mode requires `user_query`. |
-| `/evolve_list <skill_name> [--sort score]` | Show one skill's evolution records with count, average score, usage/feedback stats, section, and content preview. |
+| `/evolve <skill_name> [user_intent]` | Start an evolution review for the named Skill; trailing text is an optional review intent. The explicit command resolves the target's actual kind, so Team mode can manually evolve a regular Skill and normal mode can manually evolve a Team/Swarm Skill. |
+| `/evolve_list <skill_name>` | Show one skill's score-ordered evolution records with count, average score, usage/feedback stats, section, and content preview. |
 | `/evolve_simplify <skill_name> [user_intent]` | Generate an approval-gated cleanup plan to merge duplicates, split long records, or remove low-value records. Trailing text is passed to the backend as intent. |
 | `/evolve_rebuild <skill_name> [user_intent]` | Generate a rebuild follow-up prompt and continue as a normal Agent / Team task to rebuild `SKILL.md`. |
 
@@ -350,7 +350,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 
 ```bash
 /evolve pptx improve export error handling
-/evolve_list pptx --sort score
+/evolve_list pptx
 /evolve_simplify pptx merge duplicate export-failure records
 /evolve_rebuild pptx strengthen Troubleshooting and Examples
 ```
@@ -491,10 +491,10 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#push-to-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
-| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
+| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
+| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 3600 (1 hour) for both normal and team modes |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 
@@ -566,7 +566,7 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
 - **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
-- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs.
+- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill`, `~/skill`, or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs. Local paths must be **absolute** or use `~/...`; `~` means the JiuwenClaw service process user's home directory on the server. Other relative paths, sources under system/sensitive directories (e.g. `/etc`, `~/.ssh`), symbolic links, and `SKILL.md` files without valid `name`/`description` frontmatter are rejected.
 - **`@skillnet` search-install**: When using `/skills install <name>@skillnet`, the frontend first calls `skills.skillnet.search`. **Only auto-installs if an exact match by skill_name is found**; with no exact match, it only displays search results (with URLs and names) without auto-installing the first result — the user must choose one and install via `/skills skillnet install <url>` or `/skills install <exact_name>@skillnet`. This is because SkillNet search is semantic: searching "code" may return "taskflow", "coding-agent" etc. whose names don't contain "code".
 - **ClawHub token required**: A ClawHub CLI token must be configured before installing from ClawHub (via `/skills marketplace clawhub token <value>`). Without a token, `@clawhub` installs will fail with a message explaining how to set the token. Obtain your token at [clawhub.ai](https://clawhub.ai).
 - **ClawHub slug vs. display name**: ClawHub skills are identified by their unique **slug** (e.g., `code-review-security`), not their display name (e.g., "Code Review Assistant"). When a direct slug install fails, the system automatically searches ClawHub and displays matching results (with real slugs and summaries) to help you find the correct skill.
@@ -797,6 +797,10 @@ If `config.yaml` has no hooks configured, displays `No hooks configured.` with a
 
 #### Hooks Concept Overview
 
+User-configured tool hooks also apply to sub-agent and swarm-member tool calls.
+For these calls, hook input includes the child's `session_id` and `subagent_type`
+(`"swarm_member"` for unnamed swarm members).
+
 Hooks are extension logic that executes automatically when specific events fire. 17 events are supported:
 
 | Event | Execution Layer | Trigger |
@@ -827,6 +831,7 @@ Two hook types are supported:
 | `prompt` | Invokes LLM review. `$ARGUMENTS` in the template is replaced with JSON context, `$TOOL_NAME` with the tool name. LLM response JSON with `decision: "block"` blocks the operation. | `prompt`, `timeout` (default 15s), `model` |
 
 - **Blocking**: Exit code 2 (command) or `decision: "block"` (prompt) blocks the current operation (e.g., skip tool call) and feeds the reason back to the model.
+- **PreToolUse termination**: Blocking skips that tool and other tools in the batch that have not started executing, including after approval resumes, preserves the reason in their tool messages, and returns it as the final response. The current agent execution and task loop end without another model call to retry. A blocked Goal round, including a resumed approval, marks the original Goal as `blocked` and removes its queued continuations; resolve the hook restriction before explicitly resuming it. `PostToolUse` does not run for skipped tools; users can still submit a new request. Other parallel tools that have already started are not rolled back.
 - **Input Modification**: PreToolUse hooks can modify tool input parameters via `modifiedInput` in stdout JSON.
 - **Additional Context**: Extra information can be injected into tool results or model context via `additionalContext` in stdout JSON.
 - **Global Toggle**: `hooks.disable_all_hooks: true` in `config.yaml` disables all hooks.
@@ -1022,7 +1027,8 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | Launch the built-in setup subagent to create, review, modify, or remove the status line |
+| `/statusline get` | Always view the current status line configuration without launching the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
@@ -1034,9 +1040,9 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 - **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
-- **Agent-generated mode**: Any non-empty argument that is not a known subcommand (`set`, `padding`, `clear`, `help`, `json`, or `get`) is sent to the Agent with the `script-creator` skill. For example: `/statusline show mode, model, and remaining context`. Running `/statusline` with no arguments still only shows the current configuration.
-- **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
-- **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+- **Agent-generated mode**: `/statusline`, with or without a natural-language description, delegates to the built-in `statusline-setup` subagent. When unconfigured, it guides creation and applies the configuration. When configured, it inspects the current setup and can explain, modify, or remove it. Use `/statusline get` to display the raw configuration without launching the subagent.
+- **JSON input**: Each execution receives current session info as JSON through stdin, which the configured command can parse with `jq`, PowerShell `ConvertFrom-Json`, or another available tool.
+- **Shell selection**: On Windows, the runner uses Git Bash when it is installed and otherwise falls back to PowerShell. On macOS/Linux, it uses `sh`. The setup subagent creates a platform-appropriate persistent script and does not require `jq` on Windows.
 
 #### JSON Input Fields
 
@@ -1117,7 +1123,8 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — Launch the built-in setup subagent to create, review, modify, or remove the status line
+- `/statusline get` — View current configuration without launching the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
@@ -1136,7 +1143,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
 - **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
-- **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
+- **Windows adaptation**: The runner pipes JSON through stdin, uses Git Bash when installed, and falls back to PowerShell. Prefer a persistent PowerShell script when Git Bash or `jq` is unavailable.
 
 #### Config File Structure
 
